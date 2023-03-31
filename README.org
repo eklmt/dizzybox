@@ -1,0 +1,31 @@
+#+title: Dizzybox
+
+A container manager inspired by distrobox.
+Disclaimer: I am bad at C.
+
+** Why
+Why not.
+
+** Install
+Compile dizzybox.c with a C compiler.
+Optionally, you can symlink the subcommands.
+
+#+begin_src sh
+gcc dizzybox.c -o ~/.local/bin/dizzybox
+ln -s dizzybox ~/.local/bin/dizzybox-enter
+ln -s dizzybox ~/.local/bin/dizzybox-create
+#+end_src
+
+** Progress
+Enter works (and can be used on distrobox containers), create mostly works but is experimental.
+
+** Differences from distrobox
+Distrobox is a much more tested and stable utility.
+
+Dizzybox does not install anything in the container by default.
+Sudo is not included by default; simply use the --su flag for root in the container.
+
+Dizzybox has fewer host dependencies, only requiring podman to use, and a C compiler to build.
+
+Distrobox's main command is a wrapper for subcommands' scripts;
+dizzybox uses a monolithic main program which can be symlinked.
