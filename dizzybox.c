@@ -31,11 +31,11 @@ enum Subcommand {
   subcommandEnter,
   subcommandStart,
   subcommandCreate,
+  subcommandRemove,
   subcommandEntrypoint,
 };
 
 struct Flags {
-  char *self; // The command used to run this program
   char *container;
   char *manager; // Container manager
   char *image;
@@ -63,6 +63,15 @@ const struct Flags defaultFlags = {
     .su = false,
 };
 
+void *checkedMalloc(size_t size) {
+  void *mem = malloc(size);
+  if (!mem) {
+    fputs("Memory allocation failed\n", stderr);
+    exit(EX_OSERR);
+  }
+  return mem;
+}
+
 void printHelp(char *programName) {
   printf("Usage: %s SUBCOMMAND [OPTION]... CONTAINER\n", programName);
   puts("\n"
@@ -73,18 +82,19 @@ void printHelp(char *programName) {
        "  -s --su           Enter as root in the container\n"
        "\n"
        "create: Create a container (experimental)\n"
-       "  -image IMAGE      Specify the image to use");
+       "  --image IMAGE      Specify the image to use");
 }
 
 int parseArgs(int argc, char *argv[], struct Flags *flags) {
   if (!strcmp(argv[0], "/usr/bin/entrypoint")) {
     if (getpid() != 1) {
-      puts("entrypoint should only run as the init process. Don't run it "
-           "manually!");
+      fputs("entrypoint should only run as the init process. Don't run it "
+            "manually!\n",
+            stderr);
       return 1;
     }
     if (argc != 1) {
-      puts("Too many arguments passed to entrypoint!");
+      fputs("Too many arguments passed to entrypoint!\n", stderr);
       return 1;
     }
     flags->subcommand = subcommandEntrypoint;
@@ -123,8 +133,10 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
     flags->subcommand = subcommandStart;
   } else if (!strcmp(commandString, "create")) {
     flags->subcommand = subcommandCreate;
+  } else if (!strcmp(commandString, "rm")) {
+    flags->subcommand = subcommandRemove;
   } else {
-    printf("Unknown subcommand \"%s\"\n", argv[1]);
+    fprintf(stderr, "Unknown subcommand \"%s\"\n", argv[1]);
     return EX_USAGE;
   }
 
@@ -134,7 +146,7 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
       for (char *flag = arg + 1; *flag; ++flag) {
         switch (*flag) {
         default:
-          printf("Unrecognized shortflag \"%c\"\n", *flag);
+          fprintf(stderr, "Unrecognized shortflag \"%c\"\n", *flag);
           return EX_USAGE;
         case 's':
           flags->su = true;
@@ -157,12 +169,12 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
           } else if (!strcmp(flag, "image")) {
             char *image = argv[++i];
             if (!image) {
-              puts("--image used, but no image specified.");
+              fputs("--image used, but no image specified.\n", stderr);
             }
 
             flags->image = image;
           } else {
-            printf("Unrecognized flag \"--%s\"\n", flag);
+            fprintf(stderr, "Unrecognized flag \"--%s\"\n", flag);
             return EX_USAGE;
           }
           goto flagParseExit;
@@ -210,7 +222,11 @@ int runCommand(struct Flags flags, char *argv[]) {
 // Returned pointer must be freed
 char *mountString(char *mountpoint) {
   int mountpointLen = strlen(mountpoint);
-  char *mem = malloc(sizeof(char) * (mountpointLen * 2 + 2));
+  char *mem = checkedMalloc(sizeof(char) * (mountpointLen * 2 + 2));
+  if (!mem) {
+    return 0;
+  }
+
   strcpy(mem, mountpoint);
   mem[mountpointLen] = ':';
   strcpy(mem + mountpointLen + 1, mountpoint);
@@ -218,14 +234,32 @@ char *mountString(char *mountpoint) {
 }
 
 int containerCreate(struct Flags flags) {
+  char *self;
+  for (int selfCap = 1024;; selfCap *= 2) {
+    self = checkedMalloc(sizeof(char) * selfCap);
+    int selfLen = readlink("/proc/self/exe", self, selfCap);
+    if (selfLen < 0) {
+      fputs("Error: Could not determine path to self.\n", stderr);
+      return EX_SOFTWARE;
+    }
+
+    if (selfLen < selfCap) {
+      break;
+    }
+
+    free(self);
+  }
+
   char *home = getenv("HOME");
   if (!home) {
-    puts("The HOME environment variable must be set!");
+    fputs("The HOME environment variable must be set!\n", stderr);
+    return EX_CONFIG;
   }
   char *homeVolume = mountString(home);
   char *runtimeDir = getenv("XDG_RUNTIME_DIR");
   if (!runtimeDir) {
-    puts("The XDG_RUNTIME_DIR environment variable must be set!");
+    fputs("The XDG_RUNTIME_DIR environment variable must be set!\n", stderr);
+    return EX_CONFIG;
   }
   char *runtimeVolume = mountString(runtimeDir);
 
@@ -261,13 +295,17 @@ int containerCreate(struct Flags flags) {
 
   int nameLen = strlen(flags.container);
   char *cpTarget =
-      malloc(sizeof(char) * nameLen + sizeof(":/usr/bin/entrypoint"));
+      checkedMalloc(sizeof(char) * nameLen + sizeof(":/usr/bin/entrypoint"));
   strcpy(cpTarget, flags.container);
   strcpy(cpTarget + nameLen, ":/usr/bin/entrypoint");
-  char *argv2[] = {flags.manager, "cp", flags.self, cpTarget, 0};
+
+  char *argv2[] = {flags.manager, "cp", self, cpTarget, 0};
   exitCode = runCommand(flags, argv2);
+
   free(cpTarget);
+  free(runtimeVolume);
   free(homeVolume);
+  free(self);
   return exitCode;
 }
 
@@ -280,7 +318,7 @@ int containerStart(struct Flags flags) {
 
   int childPid = fork();
   if (childPid) {
-    int stat = 0;
+    int stat;
     waitpid(childPid, &stat, 0);
     return stat;
   } else {
@@ -295,19 +333,26 @@ int containerEnter(struct Flags flags) {
     return err;
   }
 
-  // TODO: Figure out a more appropriate size
-  const int managerArgsMax = 100;
-  int argc = 0;
-  char **argv = malloc(sizeof(char *) * (flags.argc + managerArgsMax + 1));
-  if (!argv) {
-    puts("Memory allocation failed");
-    return 1;
+  char *cwd;
+  for (int cwdCap = 1024;; cwdCap *= 2) {
+    cwd = checkedMalloc(sizeof(char) * cwdCap);
+    if (getcwd(cwd, cwdCap)) {
+      break;
+    }
+    free(cwd);
   }
 
-  argv[0] = flags.manager;
-  argv[1] = "exec";
-  argv[2] = "-it";
-  argc += 3;
+  // TODO: Figure out a more appropriate size
+  const int managerArgsMax = 100;
+  char **argv =
+      checkedMalloc(sizeof(char *) * (flags.argc + managerArgsMax + 1));
+
+  int argc = 0;
+  argv[argc++] = flags.manager;
+  argv[argc++] = "exec";
+  argv[argc++] = "-it";
+  argv[argc++] = "--workdir";
+  argv[argc++] = cwd;
 
   argv[argc++] = "-u";
   if (flags.su) {
@@ -316,18 +361,19 @@ int containerEnter(struct Flags flags) {
     argv[argc++] = getlogin();
   }
 
+  // Track all of the strings that are allocated in the loop
+  void *mustFree[sizeof(sharedEnv) / sizeof(*sharedEnv)];
+  void **freeTop = mustFree;
+
   for (char **env = sharedEnv; *env; ++env) {
     char *envVar = *env;
     char *value = getenv(envVar);
     if (value) {
       size_t envVarLen = strlen(envVar);
       size_t valueLen = strlen(value);
-      // Technically this will leak memory, but exec will take care of it...?
-      char *envArg = malloc(sizeof(char) * (envVarLen + valueLen + 2));
-      if (!envArg) {
-        puts("Allocation failure");
-        return 1;
-      }
+
+      char *envArg = checkedMalloc(sizeof(char) * (envVarLen + valueLen + 2));
+      *(freeTop++) = envArg;
 
       memcpy(envArg, envVar, envVarLen);
       envArg[envVarLen] = '=';
@@ -338,18 +384,24 @@ int containerEnter(struct Flags flags) {
     }
   }
 
-  argv[argc] = flags.container;
-  argc += 1;
+  argv[argc++] = flags.container;
 
   memcpy(argv + argc, flags.argv, sizeof(char *) * (flags.argc + 1));
-  argc += flags.argc;
   if (flags.dryRun) {
     printCommand(argv);
     free(argv);
+    while (freeTop-- > mustFree) {
+      free(*freeTop);
+    }
     return 0;
   }
 
   return execvp(argv[0], argv);
+}
+
+int containerRemove(struct Flags flags) {
+  char *argv[] = {flags.manager, "rm", flags.container, 0};
+  return execvp(flags.manager, argv);
 }
 
 int entrypoint(void) {
@@ -365,25 +417,23 @@ int entrypoint(void) {
 
 int main(int argc, char *argv[]) {
   struct Flags flags = defaultFlags;
-  char self[1024] = {0};
-  readlink("/proc/self/exe", self, 1024);
-  flags.self = self;
-
   int err = parseArgs(argc, argv, &flags);
   if (err) {
     return err;
   }
+
   switch (flags.subcommand) {
   case subcommandHelp:
     printHelp(argv[0]);
     break;
   case subcommandStart:
-    containerStart(flags);
-    break;
+    return containerStart(flags);
   case subcommandEnter:
     return containerEnter(flags);
   case subcommandCreate:
     return containerCreate(flags);
+  case subcommandRemove:
+    return containerRemove(flags);
   case subcommandEntrypoint:
     return entrypoint();
   }
