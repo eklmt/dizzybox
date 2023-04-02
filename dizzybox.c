@@ -26,6 +26,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <sysexits.h>
 #include <unistd.h>
 
+const char *version = "0.0.1";
+
 enum Subcommand {
   subcommandHelp,
   subcommandEnter,
@@ -73,6 +75,7 @@ void *checkedMalloc(size_t size) {
 }
 
 void printHelp(char *programName) {
+  printf("dizzybox version %s\n\n", version);
   printf("Usage: %s SUBCOMMAND [OPTION]... CONTAINER\n", programName);
   puts("\n"
        "all commands:\n"
@@ -233,7 +236,9 @@ char *mountString(char *mountpoint) {
   return mem;
 }
 
-int containerCreate(struct Flags flags) {
+// Sets up /usr/bin/entrypoint in the container.
+int installEntrypoint(struct Flags flags) {
+  // Find dizzybox's executable path
   char *self;
   for (int selfCap = 1024;; selfCap *= 2) {
     self = checkedMalloc(sizeof(char) * selfCap);
@@ -250,6 +255,28 @@ int containerCreate(struct Flags flags) {
     free(self);
   }
 
+  // Copy ourself as the entrypoint
+  int nameLen = strlen(flags.container);
+  char *cpTarget =
+      checkedMalloc(sizeof(char) * nameLen + sizeof(":/usr/bin/entrypoint"));
+  strcpy(cpTarget, flags.container);
+  strcpy(cpTarget + nameLen, ":/usr/bin/entrypoint");
+
+  char *argv2[] = {flags.manager, "cp", self, cpTarget, 0};
+  int exitCode = runCommand(flags, argv2);
+
+  free(cpTarget);
+
+  if (exitCode) {
+    fputs("Failed to set up container entrypoint, please rm the container\n",
+          stderr);
+    return EX_OSERR;
+  };
+
+  return 0;
+}
+
+int containerCreate(struct Flags flags) {
   char *home = getenv("HOME");
   if (!home) {
     fputs("The HOME environment variable must be set!\n", stderr);
@@ -267,18 +294,13 @@ int containerCreate(struct Flags flags) {
       flags.manager,
       "create",
       "--privileged",
-      "--user",
-      "root:root",
-      "--volume",
-      "/proc:/proc",
-      "--volume",
-      "/tmp:/tmp",
-      "--volume",
-      "/dev:/dev",
-      "--entrypoint",
-      "/usr/bin/entrypoint",
-      "--userns",
-      "keep-id",
+      "--user=root:root",
+      "--volume=/proc:/proc",
+      "--volume=/tmp:/tmp",
+      "--volume=/dev:/dev",
+      "--mount=type=devpts,destination=/dev/pts",
+      "--entrypoint=/usr/bin/entrypoint",
+      "--userns=keep-id",
       "--volume",
       homeVolume,
       "--volume",
@@ -293,20 +315,15 @@ int containerCreate(struct Flags flags) {
     return exitCode;
   }
 
-  int nameLen = strlen(flags.container);
-  char *cpTarget =
-      checkedMalloc(sizeof(char) * nameLen + sizeof(":/usr/bin/entrypoint"));
-  strcpy(cpTarget, flags.container);
-  strcpy(cpTarget + nameLen, ":/usr/bin/entrypoint");
-
-  char *argv2[] = {flags.manager, "cp", self, cpTarget, 0};
-  exitCode = runCommand(flags, argv2);
-
-  free(cpTarget);
   free(runtimeVolume);
   free(homeVolume);
-  free(self);
-  return exitCode;
+
+  exitCode = installEntrypoint(flags);
+  if (exitCode) {
+    return exitCode;
+  }
+
+  return 0;
 }
 
 int containerStart(struct Flags flags) {
@@ -328,9 +345,11 @@ int containerStart(struct Flags flags) {
 }
 
 int containerEnter(struct Flags flags) {
-  int err = containerStart(flags);
-  if (err) {
-    return err;
+  int result;
+
+  result = containerStart(flags);
+  if (result) {
+    return result;
   }
 
   char *cwd;
@@ -389,14 +408,21 @@ int containerEnter(struct Flags flags) {
   memcpy(argv + argc, flags.argv, sizeof(char *) * (flags.argc + 1));
   if (flags.dryRun) {
     printCommand(argv);
-    free(argv);
-    while (freeTop-- > mustFree) {
-      free(*freeTop);
-    }
-    return 0;
+    result = 0;
+  } else {
+    execvp(argv[0], argv);
+
+    fputs("Failed to exec", stderr);
+    result = EX_OSERR;
   }
 
-  return execvp(argv[0], argv);
+  while (freeTop-- > mustFree) {
+    free(*freeTop);
+  }
+  free(argv);
+  free(cwd);
+
+  return result;
 }
 
 int containerRemove(struct Flags flags) {
@@ -404,15 +430,26 @@ int containerRemove(struct Flags flags) {
   return execvp(flags.manager, argv);
 }
 
-int entrypoint(void) {
-  // TODO: Make it actually exit on SIGTERM
-  sigset_t exitSignals;
-  sigemptyset(&exitSignals);
-  sigaddset(&exitSignals, SIGTERM);
-  int signal;
-  sigwait(&exitSignals, &signal);
+// Signal handler that exits the program.
+void entrypointSignalHandler(int signal) {
+  (void)signal; // mark as unused
+  exit(0);
+}
 
-  return 0;
+int entrypoint(void) {
+  // Handle SIGTERM
+  struct sigaction handler = {
+      .sa_handler = entrypointSignalHandler,
+      .sa_flags = 0,
+  };
+  sigfillset(&handler.sa_mask);
+  sigaction(SIGTERM, &handler, 0);
+
+  // Reap zombies
+  int stat;
+  for (;;) {
+    wait(&stat);
+  }
 }
 
 int main(int argc, char *argv[]) {

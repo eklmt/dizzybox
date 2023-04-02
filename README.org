@@ -8,16 +8,35 @@ Why not.
 
 ** Install
 Compile dizzybox.c with a C compiler.
+Static linking is recommended to be independent of libc.
 Optionally, you can symlink the subcommands.
 
 #+begin_src sh
-gcc dizzybox.c -o ~/.local/bin/dizzybox
+gcc dizzybox.c -o ~/.local/bin/dizzybox -static
 ln -s dizzybox ~/.local/bin/dizzybox-enter
 ln -s dizzybox ~/.local/bin/dizzybox-create
+ln -s dizzybox ~/.local/bin/dizzybox-rm
 #+end_src
 
 ** Progress
-Enter works (and can be used on distrobox containers), create mostly works but is experimental.
+Enter works (and can be used on distrobox containers).
+Create also works, but please note that there are some differences to distrobox's containers.
+
+** Using Nix
+nixos/nix can be used as a container image.
+Create the container and start nix-daemon:
+#+begin_src sh
+dizzybox create --image nixos/nix nix
+dizzybox enter -s nix nix-daemon
+#+end_src
+
+nix-env does not work, but you can use nix-shell ex.
+#+begin_src sh
+dizzybox enter nix nix-shell -p zsh --run zsh
+#+end_src
+
+** Export
+Currently there's no export, just use shell aliases.
 
 ** Differences from distrobox
 Distrobox is a much more tested and stable utility.
