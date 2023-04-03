@@ -1,12 +1,11 @@
 #+title: Dizzybox
 
 A container manager inspired by distrobox.
-Disclaimer: I am bad at C.
 
-** Why
+* Why
 Why not.
 
-** Install
+* Install
 Compile dizzybox.c with a C compiler.
 Static linking is recommended to be independent of libc.
 Optionally, you can symlink the subcommands.
@@ -18,16 +17,27 @@ ln -s dizzybox ~/.local/bin/dizzybox-create
 ln -s dizzybox ~/.local/bin/dizzybox-rm
 #+end_src
 
-** Progress
-Enter works (and can be used on distrobox containers).
-Create also works, but please note that there are some differences to distrobox's containers.
+* Subcommands
+** help
+Prints out help information; this is not yet very complete.
 
-** Using Nix
-nixos/nix can be used as a container image.
-Create the container and start nix-daemon:
+** enter [CONTAINER] [...COMMAND]
+Enters a container. If command is unspecified, it defaults to the shell configured in the container.
+chsh can be used in the container to change the shell.
+
+** create [--image IMAGE] [CONTAINER]
+Creates the container with the specified image.
+
+** upgrade [CONTAINER]
+This can be used to upgrade/reinstall the entrypoint.
+
+** rm [CONTAINER]
+Removes the specified container. Currently the same as calling podman rm directly.
+
+* Using Nix for the container
+The nixos/nix container image can be used, but nix-daemon must be started manually.
 #+begin_src sh
-dizzybox create --image nixos/nix nix
-dizzybox enter -s nix nix-daemon
+dizzybox enter --image nixos/nix -s nix nix-daemon
 #+end_src
 
 nix-env does not work, but you can use nix-shell ex.
@@ -41,8 +51,8 @@ Currently there's no export, just use shell aliases.
 ** Differences from distrobox
 Distrobox is a much more tested and stable utility.
 
-Dizzybox does not install anything in the container by default.
-Sudo is not included by default; simply use the --su flag for root in the container.
+Dizzybox does not install anything in the container by default, including sudo;
+instead, the --su option can be used on entry.
 
 Dizzybox has fewer host dependencies, only requiring podman to use, and a C compiler to build.
 

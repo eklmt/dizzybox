@@ -17,6 +17,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 #define _POSIX_C_SOURCE 200112L
+#include <pwd.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -26,7 +27,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <sysexits.h>
 #include <unistd.h>
 
-const char *version = "0.0.1";
+const char *version = "0.0.2";
 
 enum Subcommand {
   subcommandHelp,
@@ -34,6 +35,7 @@ enum Subcommand {
   subcommandStart,
   subcommandCreate,
   subcommandRemove,
+  subcommandUpgrade,
   subcommandEntrypoint,
 };
 
@@ -47,7 +49,7 @@ struct Flags {
   bool verbose, dryRun, su;
 };
 
-char *defaultCommand[] = {"sh", 0};
+char *defaultCommand[] = {"/usr/bin/entrypoint", 0};
 char *sharedEnv[] = {
     "DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY",
     "LANG",    "TERM",       "XDG_RUNTIME_DIR",
@@ -90,16 +92,6 @@ void printHelp(char *programName) {
 
 int parseArgs(int argc, char *argv[], struct Flags *flags) {
   if (!strcmp(argv[0], "/usr/bin/entrypoint")) {
-    if (getpid() != 1) {
-      fputs("entrypoint should only run as the init process. Don't run it "
-            "manually!\n",
-            stderr);
-      return 1;
-    }
-    if (argc != 1) {
-      fputs("Too many arguments passed to entrypoint!\n", stderr);
-      return 1;
-    }
     flags->subcommand = subcommandEntrypoint;
     return 0;
   }
@@ -138,6 +130,8 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
     flags->subcommand = subcommandCreate;
   } else if (!strcmp(commandString, "rm")) {
     flags->subcommand = subcommandRemove;
+  } else if (!strcmp(commandString, "upgrade")) {
+    flags->subcommand = subcommandUpgrade;
   } else {
     fprintf(stderr, "Unknown subcommand \"%s\"\n", argv[1]);
     return EX_USAGE;
@@ -268,8 +262,10 @@ int installEntrypoint(struct Flags flags) {
   free(cpTarget);
 
   if (exitCode) {
-    fputs("Failed to set up container entrypoint, please rm the container\n",
-          stderr);
+    fprintf(stderr,
+            "Failed to set up container entrypoint. Calling dizzybox upgrade "
+            "%s may be able to fix it.\n",
+            flags.container);
     return EX_OSERR;
   };
 
@@ -346,6 +342,14 @@ int containerStart(struct Flags flags) {
 
 int containerEnter(struct Flags flags) {
   int result;
+
+  // strcmp is not used because we want to check if it is manually set
+  if (flags.image != defaultFlags.image) {
+    result = containerCreate(flags);
+    if (result) {
+      return result;
+    }
+  }
 
   result = containerStart(flags);
   if (result) {
@@ -436,7 +440,33 @@ void entrypointSignalHandler(int signal) {
   exit(0);
 }
 
+// This handles being run as /usr/bin/entrypoint.
+// It is used as both the container entrypoint, and as the default command to
+// run when using dizzybox enter.
 int entrypoint(void) {
+  // If we are not init, assume dizzybox enter was called.
+  if (getpid() != 1) {
+    // Note to self: Do not free pwuid!
+    struct passwd *pwuid = getpwuid(getuid());
+
+    // Try to run the configured shell
+    char *argv[] = {pwuid->pw_shell, 0};
+    execvp(argv[0], argv);
+
+    // Fall back to /bin/sh
+    fputs("Warning: Could not run user's shell, falling back to /bin/sh.\n",
+          stderr);
+    argv[0] = "/bin/sh";
+    execvp(argv[0], argv);
+
+    // Give up
+    fputs("The default entry command failed. Try explicitly specifying a "
+          "command to run.\n",
+          stderr);
+
+    return EX_OSERR;
+  }
+
   // Handle SIGTERM
   struct sigaction handler = {
       .sa_handler = entrypointSignalHandler,
@@ -471,6 +501,8 @@ int main(int argc, char *argv[]) {
     return containerCreate(flags);
   case subcommandRemove:
     return containerRemove(flags);
+  case subcommandUpgrade:
+    return installEntrypoint(flags);
   case subcommandEntrypoint:
     return entrypoint();
   }
