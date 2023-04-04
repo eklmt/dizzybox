@@ -27,7 +27,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <sysexits.h>
 #include <unistd.h>
 
-const char *version = "0.0.2";
+const char *version = "0.0.3";
 
 enum Subcommand {
   subcommandHelp,
@@ -290,7 +290,7 @@ int containerCreate(struct Flags flags) {
       flags.manager,
       "create",
       "--privileged",
-      "--user=root:root",
+      "--user=0:0",
       "--volume=/proc:/proc",
       "--volume=/tmp:/tmp",
       "--volume=/dev:/dev",
@@ -450,7 +450,7 @@ int entrypoint(void) {
     struct passwd *pwuid = getpwuid(getuid());
 
     // Try to run the configured shell
-    char *argv[] = {pwuid->pw_shell, 0};
+    char *argv[] = {pwuid->pw_shell, "-l", 0};
     execvp(argv[0], argv);
 
     // Fall back to /bin/sh
@@ -466,6 +466,24 @@ int entrypoint(void) {
 
     return EX_OSERR;
   }
+
+  // Otherwise, we are the init. Launch init.sh if it exists.
+  // Note: Race condition
+  if (!access("/etc/init.sh", X_OK)) {
+    int childPid = fork();
+    if (childPid == -1) {
+      fputs("Failed to fork.\n", stderr);
+      exit(EX_OSERR);
+    }
+
+    if (!childPid) {
+      char *argv[] = {"/etc/init.sh", 0};
+      execvp(argv[0], argv);
+
+      fputs("Warning: /etc/init.sh failed to start.\n", stderr);
+      exit(EX_OSERR);
+    }
+  };
 
   // Handle SIGTERM
   struct sigaction handler = {

@@ -1,0 +1,3 @@
+#+title: Profiles
+
+These are some examples of how to use dizzybox to automatically set up containers.
