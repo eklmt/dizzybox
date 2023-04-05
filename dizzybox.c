@@ -23,11 +23,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <sysexits.h>
 #include <unistd.h>
 
-const char *version = "0.0.3";
+const char *version = "0.0.3-dev";
 
 enum Subcommand {
   subcommandHelp,
@@ -36,6 +37,7 @@ enum Subcommand {
   subcommandCreate,
   subcommandRemove,
   subcommandUpgrade,
+  subcommandExport,
   subcommandEntrypoint,
 };
 
@@ -132,6 +134,8 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
     flags->subcommand = subcommandRemove;
   } else if (!strcmp(commandString, "upgrade")) {
     flags->subcommand = subcommandUpgrade;
+  } else if (!strcmp(commandString, "export")) {
+    flags->subcommand = subcommandExport;
   } else {
     fprintf(stderr, "Unknown subcommand \"%s\"\n", argv[1]);
     return EX_USAGE;
@@ -434,6 +438,183 @@ int containerRemove(struct Flags flags) {
   return execvp(flags.manager, argv);
 }
 
+// Export a desktop file.
+// Not implemented: XDG_DATA_DIRS, icon
+int desktopExport(struct Flags flags) {
+
+  char *fileName = flags.container;
+
+  // Get the base name of the file
+  char *baseName = fileName;
+  for (int i = strlen(fileName); i-- > 0;) {
+    if (fileName[i] == '/') {
+      baseName = fileName + i + 1;
+      break;
+    }
+  }
+
+  FILE *sourceFile = fopen(fileName, "r");
+  if (!sourceFile) {
+    fprintf(stderr, "Failed to open %s for reading.\n", fileName);
+    return EX_DATAERR;
+  }
+  struct passwd *pwuid = getpwuid(getuid());
+  if (!pwuid) {
+    fputs("Could not find you\n", stderr);
+    return EX_NOUSER;
+  }
+  char *home = pwuid->pw_dir;
+  int homeLen = strlen(home);
+  if (home[homeLen - 1] == '/') {
+    --homeLen;
+  }
+
+  FILE *destinationFile; // File to write to
+  if (flags.dryRun) {
+    destinationFile = stdout;
+  } else {
+    // destPath = `${home}/.local/share/applications/dizzybox-${baseName}`
+    const char relBaseName[] = "/.local/share/applications/dizzybox-";
+    int baseLen = strlen(baseName);
+    char *destPath = malloc(homeLen + baseLen + sizeof(relBaseName));
+    memcpy(destPath, home, homeLen);
+    memcpy(destPath + homeLen, relBaseName, sizeof(relBaseName));
+    strcpy(destPath + homeLen + sizeof(relBaseName) - 1, baseName);
+
+    // TODO: Avoid clobber
+    destinationFile = fopen(destPath, "w");
+    free(destPath);
+
+    if (!destinationFile) {
+      fclose(sourceFile);
+      fputs("Destination could not be created.\n", stderr);
+      return EX_CANTCREAT;
+    }
+  }
+
+  enum {
+    stateStartLine,
+    stateWriting,
+    stateDiscard,
+    stateExec1,
+    stateExec2,
+    stateExec3,
+    stateExec4,
+    stateExecWhitespace,
+  } state = stateStartLine;
+  for (;;) {
+    int next = fgetc(sourceFile);
+    if (next == EOF) {
+      break;
+    }
+    // TODO: Add error checking to writes
+    switch (state) {
+    case stateStartLine:
+      if (next == 'E') {
+        state = stateExec1;
+      } else {
+        fputc(next, destinationFile);
+        state = stateWriting;
+      }
+      break;
+    case stateWriting:
+      fputc(next, destinationFile);
+      if (next == '\n') {
+        state = stateStartLine;
+      }
+      break;
+    case stateDiscard:
+      if (next == '\n') {
+        fputc(next, destinationFile);
+        state = stateStartLine;
+      }
+      break;
+    case stateExec1:
+      if (next == 'x') {
+        state = stateExec2;
+        break;
+      }
+      fputs("E", destinationFile);
+      fputc(next, destinationFile);
+      if (next == '\n') {
+        state = stateStartLine;
+      } else {
+        state = stateWriting;
+      }
+      break;
+    case stateExec2:
+      if (next == 'e') {
+        state = stateExec3;
+        break;
+      }
+      fputs("Ex", destinationFile);
+      fputc(next, destinationFile);
+      if (next == '\n') {
+        state = stateStartLine;
+      } else {
+        state = stateWriting;
+      }
+      break;
+    case stateExec3:
+      if (next == 'c') {
+        state = stateExec4;
+        break;
+      }
+      fputs("Exe", destinationFile);
+      fputc(next, destinationFile);
+      if (next == '\n') {
+        state = stateStartLine;
+      } else {
+        state = stateWriting;
+      }
+      break;
+    case stateExec4:
+      // Need check for any whitespace
+      if (next == ' ') {
+        fputs("Exec ", destinationFile);
+        state = stateExecWhitespace;
+        break;
+      }
+      if (next == '=') {
+        // TODO: Detect the actual container
+        fputs("Exec=dizzybox enter -- ", destinationFile);
+        state = stateWriting;
+        break;
+      }
+
+      // Exec* (ex. "ExecIf") should be discarded
+      state = stateDiscard;
+      break;
+    case stateExecWhitespace:
+      fputc(next, destinationFile);
+      if (next == ' ') {
+        continue;
+      }
+      if (next == '=') {
+        // TODO: Detect the actual container
+        fputs("dizzybox enter -- ", destinationFile);
+        state = stateWriting;
+        break;
+      }
+      if (next == '\n') {
+        state = stateStartLine;
+      } else {
+        state = stateWriting;
+      }
+      break;
+    }
+  }
+
+  int err = ferror(sourceFile);
+  fclose(destinationFile);
+  fclose(sourceFile);
+  if (err) {
+    fputs("Warning: Potentially partial write", stderr);
+    return EX_DATAERR;
+  }
+  return 0;
+}
+
 // Signal handler that exits the program.
 void entrypointSignalHandler(int signal) {
   (void)signal; // mark as unused
@@ -521,6 +702,8 @@ int main(int argc, char *argv[]) {
     return containerRemove(flags);
   case subcommandUpgrade:
     return installEntrypoint(flags);
+  case subcommandExport:
+    return desktopExport(flags);
   case subcommandEntrypoint:
     return entrypoint();
   }

@@ -1,42 +1,54 @@
-#+title: Dizzybox
+# Dizzybox
 
 A container manager inspired by distrobox.
 
-* Why
-Why not.
+The version number is fairly meanininglessas of now.
+Tagged revisions are what I consider to be in a working state, but I do not guarantee backwards/forwards compatibility.
 
-* Install
-Podman is a required runtime dependency for the host.
-Compile dizzybox.c with a C compiler.
-Static linking is recommended to be independent of libc.
-You can optionally symlink the subcommands.
+## Why
+Why not?
 
-#+begin_src sh
-gcc dizzybox.c -o ~/.local/bin/dizzybox -static
+## Install
+### Releases
+The releases have binaries for x86_64, statically linked with musl.
+Just extract it and put it in your PATH.
+Podman is a required runtime dependency for the host; 
+
+You can optionally symlink the subcommands (though everything will work fine without doing so).
+
+```sh
 ln -s dizzybox ~/.local/bin/dizzybox-enter
 ln -s dizzybox ~/.local/bin/dizzybox-create
 ln -s dizzybox ~/.local/bin/dizzybox-rm
-#+end_src
+```
 
-* Subcommands
-** help
+### From source
+Compile dizzybox.c with a C compiler.
+Static linking is recommended to avoid dependency on libc.
+
+## Subcommands
+### help
 Prints out help information; this is not yet very complete.
 
-** enter [CONTAINER] [...COMMAND]
+### enter [CONTAINER] [...COMMAND]
 Enters a container. If command is unspecified, it defaults to the shell configured in the container.
 chsh can be used in the container to change the shell.
 
-** create [--image IMAGE] [CONTAINER]
+### create [--image IMAGE] [CONTAINER]
 Creates the container with the specified image.
 
-** upgrade [CONTAINER]
+### upgrade [CONTAINER]
 This can be used to upgrade/reinstall the entrypoint.
 
-** rm [CONTAINER]
+### rm [CONTAINER]
 Removes the specified container. Currently the same as calling podman rm directly.
 
-* Using Nix for the container
-Run src_sh{profiles/nix.sh}. You can then enter with src_sh{dizzybox enter nix}.
+### export [...OPTIONS] FILE.desktop
+Experimental, incomplete command to export a desktop entry.
+Must use full or relative path.
+
+## Using Nix for the container
+Run ~profiles/nix.sh~. You can then enter with ~dizzybox enter nix~.
 
 If you try to run programs installed with nix-env directly from enter, you will find they are not on the PATH.
 To fix this, run your command with sh -lc.
@@ -44,10 +56,10 @@ To fix this, run your command with sh -lc.
 dizzybox enter nix sh -lc 'exec zsh'
 #+end_src
 
-** Export
+## Command export
 Currently there's no export, just use shell aliases.
 
-** Differences with distrobox
+## Differences with distrobox
 Distrobox is a much more tested and stable utility.
 
 Dizzybox does not install anything in the container by default, including sudo;
