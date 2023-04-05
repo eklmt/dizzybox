@@ -12,7 +12,8 @@ Why not?
 ### Releases
 The releases have binaries for x86_64, statically linked with musl.
 Just extract it and put it in your PATH.
-Podman is a required runtime dependency for the host; 
+Podman is a required runtime dependency for the host;
+[see distrobox's guide to install it without root](https://github.com/89luca89/distrobox/blob/main/docs/compatibility.md#install-podman-in-a-static-manner).
 
 You can optionally symlink the subcommands (though everything will work fine without doing so).
 
@@ -48,7 +49,7 @@ Experimental, incomplete command to export a desktop entry.
 Must use full or relative path.
 
 ## Using Nix for the container
-Run ~profiles/nix.sh~. You can then enter with ~dizzybox enter nix~.
+Run ```profiles/nix.sh```. You can then enter with ```dizzybox enter nix```.
 
 If you try to run programs installed with nix-env directly from enter, you will find they are not on the PATH.
 To fix this, run your command with sh -lc.

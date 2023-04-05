@@ -45,6 +45,7 @@ struct Flags {
   char *container;
   char *manager; // Container manager
   char *image;
+  char *fakeHome;
   int argc;
   char **argv;
   enum Subcommand subcommand;
@@ -144,7 +145,7 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
   for (; i < argc; ++i) {
     char *arg = argv[i];
     if (arg[0] == '-') {
-      for (char *flag = arg + 1; *flag; ++flag) {
+      for (char *flag = arg; *++flag;) {
         switch (*flag) {
         default:
           fprintf(stderr, "Unrecognized shortflag \"%c\"\n", *flag);
@@ -168,17 +169,25 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
           } else if (!strcmp(flag, "dry-run")) {
             flags->dryRun = true;
           } else if (!strcmp(flag, "image")) {
-            char *image = argv[++i];
-            if (!image) {
+            if (++i == argc) {
               fputs("--image used, but no image specified.\n", stderr);
+              return EX_USAGE;
             }
-
-            flags->image = image;
+            flags->image = argv[i];
+          } else if (!strcmp(flag, "fake-home")) {
+            if (flags->subcommand != subcommandCreate) {
+              fputs("Warning: --fake-home only affects create.\n", stderr);
+            }
+            if (++i == argc) {
+              fputs("--fake-home used, but no directory specified.\n", stderr);
+              return EX_USAGE;
+            }
+            flags->fakeHome = argv[i];
           } else {
             fprintf(stderr, "Unrecognized flag \"--%s\"\n", flag);
             return EX_USAGE;
           }
-          goto flagParseExit;
+          goto flagParserContinue;
         }
       }
     } else {
@@ -189,7 +198,7 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
       }
       return 0;
     }
-  flagParseExit:;
+  flagParserContinue:;
   }
   return 0;
 }
@@ -277,12 +286,13 @@ int installEntrypoint(struct Flags flags) {
 }
 
 int containerCreate(struct Flags flags) {
-  char *home = getenv("HOME");
-  if (!home) {
-    fputs("The HOME environment variable must be set!\n", stderr);
+  struct passwd *pwuid = getpwuid(getuid());
+  if (!pwuid) {
+    fputs("Failed to get user home information.\n", stderr);
     return EX_CONFIG;
   }
-  char *homeVolume = mountString(home);
+  char *homeVolume = mountString(pwuid->pw_dir);
+
   char *runtimeDir = getenv("XDG_RUNTIME_DIR");
   if (!runtimeDir) {
     fputs("The XDG_RUNTIME_DIR environment variable must be set!\n", stderr);
@@ -295,7 +305,7 @@ int containerCreate(struct Flags flags) {
       "create",
       "--privileged",
       "--user=0:0",
-      "--volume=/proc:/proc",
+      "--volume=/run/host:/run/host",
       "--volume=/tmp:/tmp",
       "--volume=/dev:/dev",
       "--mount=type=devpts,destination=/dev/pts",
@@ -374,12 +384,20 @@ int containerEnter(struct Flags flags) {
   char **argv =
       checkedMalloc(sizeof(char *) * (flags.argc + managerArgsMax + 1));
 
+  int containerLen = strlen(flags.container);
+  char *containerArg = checkedMalloc(sizeof("CONTAINER_ID=") + containerLen);
+  memcpy(containerArg, "CONTAINER_ID=", sizeof("CONTAINER_ID=") - 1);
+  memcpy(containerArg + sizeof("CONTAINER_ID=") - 1, flags.container,
+         containerLen + 1);
+
   int argc = 0;
   argv[argc++] = flags.manager;
   argv[argc++] = "exec";
   argv[argc++] = "-it";
   argv[argc++] = "--workdir";
   argv[argc++] = cwd;
+  argv[argc++] = "--env";
+  argv[argc++] = containerArg;
 
   argv[argc++] = "-u";
   if (flags.su) {
@@ -427,6 +445,7 @@ int containerEnter(struct Flags flags) {
   while (freeTop-- > mustFree) {
     free(*freeTop);
   }
+  free(containerArg);
   free(argv);
   free(cwd);
 
@@ -441,8 +460,12 @@ int containerRemove(struct Flags flags) {
 // Export a desktop file.
 // Not implemented: XDG_DATA_DIRS, icon
 int desktopExport(struct Flags flags) {
-
   char *fileName = flags.container;
+  char *containerId = getenv("CONTAINER_ID");
+  if (!containerId) {
+    puts("Failed to get container ID. $CONTAINER_ID must be set.");
+    return EX_CONFIG;
+  }
 
   // Get the base name of the file
   char *baseName = fileName;
@@ -453,11 +476,6 @@ int desktopExport(struct Flags flags) {
     }
   }
 
-  FILE *sourceFile = fopen(fileName, "r");
-  if (!sourceFile) {
-    fprintf(stderr, "Failed to open %s for reading.\n", fileName);
-    return EX_DATAERR;
-  }
   struct passwd *pwuid = getpwuid(getuid());
   if (!pwuid) {
     fputs("Could not find you\n", stderr);
@@ -469,6 +487,12 @@ int desktopExport(struct Flags flags) {
     --homeLen;
   }
 
+  FILE *sourceFile = fopen(fileName, "r");
+  if (!sourceFile) {
+    fprintf(stderr, "Failed to open %s for reading.\n", fileName);
+    return EX_DATAERR;
+  }
+
   FILE *destinationFile; // File to write to
   if (flags.dryRun) {
     destinationFile = stdout;
@@ -476,10 +500,13 @@ int desktopExport(struct Flags flags) {
     // destPath = `${home}/.local/share/applications/dizzybox-${baseName}`
     const char relBaseName[] = "/.local/share/applications/dizzybox-";
     int baseLen = strlen(baseName);
-    char *destPath = malloc(homeLen + baseLen + sizeof(relBaseName));
-    memcpy(destPath, home, homeLen);
-    memcpy(destPath + homeLen, relBaseName, sizeof(relBaseName));
-    strcpy(destPath + homeLen + sizeof(relBaseName) - 1, baseName);
+    char *destPath = malloc(homeLen + baseLen + sizeof(relBaseName) +
+                            sizeof("/run/host") - 1);
+    char *pathTail = destPath;
+    memcpy(pathTail, "/run/host", sizeof("/run/host") - 1);
+    memcpy(pathTail += sizeof("/run/host") - 1, home, homeLen);
+    memcpy(pathTail += homeLen, relBaseName, sizeof(relBaseName));
+    strcpy(pathTail += sizeof(relBaseName) - 1, baseName);
 
     // TODO: Avoid clobber
     destinationFile = fopen(destPath, "w");
@@ -576,8 +603,10 @@ int desktopExport(struct Flags flags) {
         break;
       }
       if (next == '=') {
-        // TODO: Detect the actual container
-        fputs("Exec=dizzybox enter -- ", destinationFile);
+        fputs("Exec=dizzybox enter ", destinationFile);
+        // Podman's rules are strict enough to not need escaping.
+        fputs(containerId, destinationFile);
+        fputs(" ", destinationFile);
         state = stateWriting;
         break;
       }
