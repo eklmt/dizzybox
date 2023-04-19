@@ -23,6 +23,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sysexits.h>
@@ -49,10 +50,10 @@ struct Flags {
   int argc;
   char **argv;
   enum Subcommand subcommand;
-  bool verbose, dryRun, su;
+  bool verbose, dryRun, su, shell;
 };
 
-char *defaultCommand[] = {"/usr/bin/entrypoint", 0};
+char *defaultCommand[] = {"/usr/bin/entrypoint", "-l", 0};
 char *sharedEnv[] = {
     "DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY",
     "LANG",    "TERM",       "XDG_RUNTIME_DIR",
@@ -63,6 +64,7 @@ const struct Flags defaultFlags = {
     .container = "my-dizzybox",
     .manager = "podman",
     .image = "archlinux:latest",
+    .argc = sizeof(defaultCommand) / sizeof(*defaultCommand) - 1,
     .argv = defaultCommand,
     .subcommand = subcommandHelp,
     .verbose = false,
@@ -183,6 +185,11 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
               return EX_USAGE;
             }
             flags->fakeHome = argv[i];
+          } else if (!strcmp(flag, "shell")) {
+            if (flags->subcommand != subcommandExport) {
+              fputs("Warning: --shell only affects export.\n", stderr);
+            }
+            flags->shell = true;
           } else {
             fprintf(stderr, "Unrecognized flag \"--%s\"\n", flag);
             return EX_USAGE;
@@ -200,6 +207,7 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
     }
   flagParserContinue:;
   }
+
   return 0;
 }
 
@@ -219,6 +227,11 @@ int runCommand(struct Flags flags, char *argv[]) {
   }
 
   int childPid = fork();
+  if (childPid == -1) {
+    fputs("Fork failed.", stderr);
+    return EX_OSERR;
+  }
+
   if (childPid) {
     int stat = 0;
     waitpid(childPid, &stat, 0);
@@ -304,6 +317,7 @@ int containerCreate(struct Flags flags) {
       flags.manager,
       "create",
       "--privileged",
+      "--net=host",
       "--user=0:0",
       "--volume=/run/host:/run/host",
       "--volume=/tmp:/tmp",
@@ -461,6 +475,13 @@ int containerRemove(struct Flags flags) {
 // Not implemented: XDG_DATA_DIRS, icon
 int desktopExport(struct Flags flags) {
   char *fileName = flags.container;
+
+  // Intentional pointer equality check
+  if (fileName == defaultFlags.container) {
+    fputs("The file to export must be specified.\n", stderr);
+    return EX_USAGE;
+  }
+
   char *containerId = getenv("CONTAINER_ID");
   if (!containerId) {
     puts("Failed to get container ID. $CONTAINER_ID must be set.");
@@ -508,14 +529,32 @@ int desktopExport(struct Flags flags) {
     memcpy(pathTail += homeLen, relBaseName, sizeof(relBaseName));
     strcpy(pathTail += sizeof(relBaseName) - 1, baseName);
 
-    // TODO: Avoid clobber
-    destinationFile = fopen(destPath, "w");
-    free(destPath);
-
+    // File is opened in append to avoid clobber
+    destinationFile = fopen(destPath, "a");
     if (!destinationFile) {
       fclose(sourceFile);
-      fputs("Destination could not be created.\n", stderr);
+      fprintf(stderr, "Destination file %s could not be created.\n", destPath);
+      free(destPath);
       return EX_CANTCREAT;
+    }
+
+    // Verify that we are writing to an empty file
+    struct stat destInfo;
+    if (fstat(fileno(destinationFile), &destInfo)) {
+      fclose(sourceFile);
+      fclose(destinationFile);
+      fprintf(stderr, "Failed to retrieve the file information for %s.\n",
+              destPath);
+      free(destPath);
+      return EX_DATAERR;
+    };
+
+    if (destInfo.st_size) {
+      fclose(sourceFile);
+      fclose(destinationFile);
+      fprintf(stderr, "Refusing to clobber non-empty file %s.\n", destPath);
+      free(destPath);
+      return EX_DATAERR;
     }
   }
 
@@ -607,6 +646,9 @@ int desktopExport(struct Flags flags) {
         // Podman's rules are strict enough to not need escaping.
         fputs(containerId, destinationFile);
         fputs(" ", destinationFile);
+        if (flags.shell) {
+          fputs("/usr/bin/entrypoint -l -c 'exec \"$@\"' -- ", destinationFile);
+        }
         state = stateWriting;
         break;
       }
@@ -620,8 +662,13 @@ int desktopExport(struct Flags flags) {
         continue;
       }
       if (next == '=') {
-        // TODO: Detect the actual container
-        fputs("dizzybox enter -- ", destinationFile);
+        fputs("Exec=dizzybox enter ", destinationFile);
+        // Podman's rules are strict enough to not need escaping.
+        fputs(containerId, destinationFile);
+        fputs(" ", destinationFile);
+        if (flags.shell) {
+          fputs("/usr/bin/entrypoint -l -c 'exec \"$@\"' -- ", destinationFile);
+        }
         state = stateWriting;
         break;
       }
@@ -653,14 +700,17 @@ void entrypointSignalHandler(int signal) {
 // This handles being run as /usr/bin/entrypoint.
 // It is used as both the container entrypoint, and as the default command to
 // run when using dizzybox enter.
-int entrypoint(void) {
-  // If we are not init, assume dizzybox enter was called.
+int entrypoint(int argc, char *argv[]) {
+  (void)argc; // argc is currently passed for consistency only
+
+  // If we are not init, entrypoint exec the user's default shell.
   if (getpid() != 1) {
     // Note to self: Do not free pwuid!
     struct passwd *pwuid = getpwuid(getuid());
 
     // Try to run the configured shell
-    char *argv[] = {pwuid->pw_shell, "-l", 0};
+
+    argv[0] = pwuid->pw_shell;
     execvp(argv[0], argv);
 
     // Fall back to /bin/sh
@@ -703,9 +753,8 @@ int entrypoint(void) {
   sigfillset(&handler.sa_mask);
   sigaction(SIGTERM, &handler, 0);
 
-  // Reap zombies
-  int stat;
-  for (;;) {
+  // Reap zombies until SIGTERM
+  for (int stat;;) {
     wait(&stat);
   }
 }
@@ -734,7 +783,7 @@ int main(int argc, char *argv[]) {
   case subcommandExport:
     return desktopExport(flags);
   case subcommandEntrypoint:
-    return entrypoint();
+    return entrypoint(argc, argv);
   }
 
   return 0;
