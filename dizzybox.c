@@ -55,9 +55,8 @@ struct Flags {
 
 char *defaultCommand[] = {"/usr/bin/entrypoint", "-l", 0};
 char *sharedEnv[] = {
-    "DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY",
-    "LANG",    "TERM",       "XDG_RUNTIME_DIR",
-    0,
+    "DISPLAY", "XAUTHORITY",      "WAYLAND_DISPLAY",          "LANG",
+    "TERM",    "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", 0,
 };
 
 const struct Flags defaultFlags = {
@@ -746,16 +745,22 @@ int entrypoint(int argc, char *argv[]) {
   };
 
   // Handle SIGTERM
-  struct sigaction handler = {
+  struct sigaction termHandler = {
       .sa_handler = entrypointSignalHandler,
       .sa_flags = 0,
   };
-  sigfillset(&handler.sa_mask);
-  sigaction(SIGTERM, &handler, 0);
+  sigfillset(&termHandler.sa_mask);
+  sigaction(SIGTERM, &termHandler, 0);
 
-  // Reap zombies until SIGTERM
-  for (int stat;;) {
-    wait(&stat);
+  // Disable creation of zombies
+  struct sigaction childHandler = {
+      .sa_flags = SA_NOCLDWAIT,
+  };
+  sigaction(SIGCHLD, &childHandler, 0);
+
+  // Sleep forever
+  for (;;) {
+    pause();
   }
 }
 
