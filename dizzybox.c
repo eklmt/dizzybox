@@ -29,7 +29,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <sysexits.h>
 #include <unistd.h>
 
-const char *version = "0.0.3-dev";
+char const *const version = "0.0.4-dev";
 
 enum Subcommand {
   subcommandHelp,
@@ -66,21 +66,25 @@ const struct Flags defaultFlags = {
     .argc = sizeof(defaultCommand) / sizeof(*defaultCommand) - 1,
     .argv = defaultCommand,
     .subcommand = subcommandHelp,
-    .verbose = false,
     .dryRun = false,
     .su = false,
 };
 
 void *checkedMalloc(size_t size) {
   void *mem = malloc(size);
-  if (!mem) {
-    fputs("Memory allocation failed\n", stderr);
-    exit(EX_OSERR);
+  if (mem) {
+    return mem;
   }
-  return mem;
+
+  fputs("Memory allocation failed\n", stderr);
+  exit(EX_OSERR);
 }
 
 void printHelp(char *programName) {
+  if (!programName) {
+    programName = "dizzybox";
+  }
+
   printf("dizzybox version %s\n\n", version);
   printf("Usage: %s SUBCOMMAND [OPTION]... CONTAINER\n", programName);
   puts("\n"
@@ -103,7 +107,7 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
   char *commandString = 0;
   int commandLen = strlen(argv[0]);
   // Search backwards through the command name for a subcommand.
-  for (int commandIndex = commandLen - 1; commandIndex >= 0; --commandIndex) {
+  for (int commandIndex = commandLen - 1; commandIndex-- > 0;) {
     if (argv[0][commandIndex] == '-') {
       commandString = argv[0] + commandIndex + 1;
       break;
@@ -157,9 +161,8 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
         case 'd':
           flags->dryRun = true;
           break;
-        case '-': // "--*"
-          flag += 1;
-          if (!*flag) { // "--"
+        case '-':         // "--*"
+          if (!*++flag) { // "--"
             if (argv[i + 1]) {
               flags->argv = argv + i + 1;
               flags->argc = argc - i + 1;
@@ -754,6 +757,7 @@ int entrypoint(int argc, char *argv[]) {
 
   // Disable creation of zombies
   struct sigaction childHandler = {
+      .sa_handler = SIG_IGN,
       .sa_flags = SA_NOCLDWAIT,
   };
   sigaction(SIGCHLD, &childHandler, 0);
