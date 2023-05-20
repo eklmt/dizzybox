@@ -2,7 +2,7 @@
 
 A container manager inspired by distrobox.
 
-The version number is fairly meanininglessas of now.
+The version number is fairly meaningless as of now.
 Tagged revisions are what I consider to be in a working state, but I do not guarantee backwards/forwards compatibility.
 
 ## Why

@@ -29,7 +29,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <sysexits.h>
 #include <unistd.h>
 
-char const *const version = "0.0.4-dev";
+#ifndef VERSION
+#define VERSION "0.0.4-dev"
+#endif
+
+#define ENTRYPOINT "/usr/bin/entrypoint"
 
 enum Subcommand {
   subcommandHelp,
@@ -47,13 +51,13 @@ struct Flags {
   char *manager; // Container manager
   char *image;
   char *fakeHome;
-  int argc;
   char **argv;
+  int argc;
   enum Subcommand subcommand;
-  bool verbose, dryRun, su, shell;
+  bool dryRun, su, shell;
 };
 
-char *defaultCommand[] = {"/usr/bin/entrypoint", "-l", 0};
+char *defaultCommand[] = {ENTRYPOINT, "-l", 0};
 char *sharedEnv[] = {
     "DISPLAY", "XAUTHORITY",      "WAYLAND_DISPLAY",          "LANG",
     "TERM",    "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", 0,
@@ -85,7 +89,7 @@ void printHelp(char *programName) {
     programName = "dizzybox";
   }
 
-  printf("dizzybox version %s\n\n", version);
+  puts("dizzybox version " VERSION "\n");
   printf("Usage: %s SUBCOMMAND [OPTION]... CONTAINER\n", programName);
   puts("\n"
        "all commands:\n"
@@ -99,7 +103,7 @@ void printHelp(char *programName) {
 }
 
 int parseArgs(int argc, char *argv[], struct Flags *flags) {
-  if (!strcmp(argv[0], "/usr/bin/entrypoint")) {
+  if (!strcmp(argv[0], ENTRYPOINT)) {
     flags->subcommand = subcommandEntrypoint;
     return 0;
   }
@@ -280,9 +284,9 @@ int installEntrypoint(struct Flags flags) {
   // Copy ourself as the entrypoint
   int nameLen = strlen(flags.container);
   char *cpTarget =
-      checkedMalloc(sizeof(char) * nameLen + sizeof(":/usr/bin/entrypoint"));
+      checkedMalloc(sizeof(char) * nameLen + sizeof(":" ENTRYPOINT));
   strcpy(cpTarget, flags.container);
-  strcpy(cpTarget + nameLen, ":/usr/bin/entrypoint");
+  strcpy(cpTarget + nameLen, ":" ENTRYPOINT);
 
   char *argv2[] = {flags.manager, "cp", self, cpTarget, 0};
   int exitCode = runCommand(flags, argv2);
@@ -325,7 +329,7 @@ int containerCreate(struct Flags flags) {
       "--volume=/tmp:/tmp",
       "--volume=/dev:/dev",
       "--mount=type=devpts,destination=/dev/pts",
-      "--entrypoint=/usr/bin/entrypoint",
+      ("--entrypoint=" ENTRYPOINT),
       "--userns=keep-id",
       "--volume",
       homeVolume,
