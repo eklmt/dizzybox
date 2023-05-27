@@ -568,12 +568,21 @@ int desktopExport(struct Flags flags) {
     stateStartLine,
     stateWriting,
     stateDiscard,
-    stateExec1,
-    stateExec2,
-    stateExec3,
-    stateExec4,
+    stateE,
+    stateEx,
+    stateExe,
+    stateExec,
     stateExecWhitespace,
+    stateT,
+    stateTr,
+    stateTry,
+    stateTryE,
+    stateTryEx,
+    stateTryExe,
+    stateTryExec,
   } state = stateStartLine;
+  static char const *const tryExecStr = "TryExec";
+  static char const *const execStr = tryExecStr + 3;
   for (;;) {
     int next = fgetc(sourceFile);
     if (next == EOF) {
@@ -583,12 +592,15 @@ int desktopExport(struct Flags flags) {
     switch (state) {
     case stateStartLine:
       if (next == 'E') {
-        state = stateExec1;
-      } else {
-        fputc(next, destinationFile);
-        state = stateWriting;
+        state = stateE;
+        break;
       }
-      break;
+      if (next == 'T') {
+        state = stateT;
+        break;
+      }
+      state = stateWriting;
+      // Fallthrough
     case stateWriting:
       fputc(next, destinationFile);
       if (next == '\n') {
@@ -601,77 +613,34 @@ int desktopExport(struct Flags flags) {
         state = stateStartLine;
       }
       break;
-    case stateExec1:
-      if (next == 'x') {
-        state = stateExec2;
+    case stateE:
+    case stateEx:
+    case stateExe:
+      if (next == execStr[++state - stateE]) {
         break;
       }
-      fputs("E", destinationFile);
+      {
+        char const *const end = execStr + state - stateE;
+        for (char const *p = execStr; p < end; ++p)
+          fputc(*p, destinationFile);
+      }
       fputc(next, destinationFile);
-      if (next == '\n') {
-        state = stateStartLine;
-      } else {
-        state = stateWriting;
-      }
+      state = next == '\n' ? stateStartLine : stateWriting;
       break;
-    case stateExec2:
-      if (next == 'e') {
-        state = stateExec3;
-        break;
-      }
-      fputs("Ex", destinationFile);
-      fputc(next, destinationFile);
-      if (next == '\n') {
-        state = stateStartLine;
-      } else {
-        state = stateWriting;
-      }
-      break;
-    case stateExec3:
-      if (next == 'c') {
-        state = stateExec4;
-        break;
-      }
-      fputs("Exe", destinationFile);
-      fputc(next, destinationFile);
-      if (next == '\n') {
-        state = stateStartLine;
-      } else {
-        state = stateWriting;
-      }
-      break;
-    case stateExec4:
-      // Need check for any whitespace
-      if (next == ' ') {
-        fputs("Exec ", destinationFile);
-        state = stateExecWhitespace;
-        break;
-      }
-      if (next == '=') {
-        fputs("Exec=dizzybox enter ", destinationFile);
-        // Podman's rules are strict enough to not need escaping.
-        fputs(containerId, destinationFile);
-        fputs(" ", destinationFile);
-        if (flags.shell) {
-          fputs("/usr/bin/entrypoint -l -c 'exec \"$@\"' -- ", destinationFile);
-        }
-        state = stateWriting;
-        break;
-      }
-
-      // Exec* (ex. "ExecIf") should be discarded
-      state = stateDiscard;
-      break;
+    case stateExec:
+      fputs(execStr, destinationFile);
+      state = stateExecWhitespace;
+      // Fallthrough
     case stateExecWhitespace:
       fputc(next, destinationFile);
       if (next == ' ') {
-        continue;
+        break;
       }
       if (next == '=') {
-        fputs("Exec=dizzybox enter ", destinationFile);
+        fputs("dizzybox enter ", destinationFile);
         // Podman's rules are strict enough to not need escaping.
         fputs(containerId, destinationFile);
-        fputs(" ", destinationFile);
+        fputc(' ', destinationFile);
         if (flags.shell) {
           fputs("/usr/bin/entrypoint -l -c 'exec \"$@\"' -- ", destinationFile);
         }
@@ -683,6 +652,31 @@ int desktopExport(struct Flags flags) {
       } else {
         state = stateWriting;
       }
+      break;
+    case stateT:
+    case stateTr:
+    case stateTry:
+    case stateTryE:
+    case stateTryEx:
+    case stateTryExe:
+      if (next == tryExecStr[++state - stateT]) {
+        break;
+      }
+      {
+        char const *const end = tryExecStr + state - stateT;
+        for (char const *p = tryExecStr; p < end; ++p)
+          fputc(*p, destinationFile);
+      }
+      fputc(next, destinationFile);
+      state = next == '\n' ? stateStartLine : stateWriting;
+      break;
+    case stateTryExec:
+      if (next == ' ' || next == '=') {
+        state = stateDiscard;
+        break;
+      }
+      fputs(tryExecStr, destinationFile);
+      state = stateWriting;
       break;
     }
   }
