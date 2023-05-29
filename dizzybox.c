@@ -36,14 +36,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #define ENTRYPOINT "/usr/bin/entrypoint"
 
 enum Subcommand {
-  subcommandHelp,
-  subcommandEnter,
-  subcommandStart,
   subcommandCreate,
-  subcommandRemove,
-  subcommandUpgrade,
-  subcommandExport,
+  subcommandEnter,
   subcommandEntrypoint,
+  subcommandExport,
+  subcommandHelp,
+  subcommandRemove,
+  subcommandStart,
+  subcommandUpgrade,
 };
 
 struct Flags {
@@ -89,72 +89,135 @@ void printHelp(char *programName) {
     programName = "dizzybox";
   }
 
-  puts("dizzybox version " VERSION "\n");
-  printf("Usage: %s SUBCOMMAND [OPTION]... CONTAINER\n", programName);
-  puts("\n"
-       "all commands:\n"
-       "  -d --dry-run      Print commands instead of doing them\n"
-       "\n"
-       "enter: Enter a container\n"
-       "  -s --su           Enter as root in the container\n"
-       "\n"
-       "create: Create a container (experimental)\n"
-       "  --image IMAGE      Specify the image to use");
+  puts("\
+dizzybox version " VERSION "\n\
+\n\
+Usage: [global options] dizzybox COMMAND [command options]\n\
+\n\
+Commands:\n\
+  create CONTAINER          Create the specified container.\n\
+    --image IMAGE           Specify the image to use\n\
+  enter  CONTAINER          Enter the specified container.\n\
+    -s, --su                Become root in the container\n\
+  rm                        Remove a container\n\
+  export ...ENTRIES         Export desktop entries to the host\n\
+    --shell                 Make entries start using the login shell\n\
+  upgrade CONTAINER         Upgrade the entrypoint of the specified container\n\
+  help                      Show this help message\n\
+\n\
+Global Options:\n\
+  -d --dry-run              Print commands instead of doing them");
 }
 
-int parseArgs(int argc, char *argv[], struct Flags *flags) {
-  if (!strcmp(argv[0], ENTRYPOINT)) {
+// Returns -1 on failure
+int parseSubcommand(char *p, enum Subcommand *sc) {
+  if (!strcmp(p, "enter")) {
+    *sc = subcommandEnter;
+  } else if (!strcmp(p, "start")) {
+    *sc = subcommandStart;
+  } else if (!strcmp(p, "create")) {
+    *sc = subcommandCreate;
+  } else if (!strcmp(p, "rm")) {
+    *sc = subcommandRemove;
+  } else if (!strcmp(p, "upgrade")) {
+    *sc = subcommandUpgrade;
+  } else if (!strcmp(p, "export")) {
+    *sc = subcommandExport;
+  } else if (!strcmp(p, "help")) {
+    *sc = subcommandHelp;
+  } else {
+    return -1;
+  }
+  return 0;
+}
+
+void unreachable(void) {
+  fputs("Unreachable reached", stderr);
+  exit(EX_SOFTWARE);
+}
+
+int parseArgs(int argc, char **argv, struct Flags *flags) {
+  char **end = argv + argc;
+  if (!strcmp(*argv, ENTRYPOINT)) {
     flags->subcommand = subcommandEntrypoint;
     return 0;
   }
 
-  char *commandString = 0;
-  int commandLen = strlen(argv[0]);
+  enum {
+    stSubcommand,
+    stContainer,
+    stArguments,
+    stNoMore,
+  } state = stSubcommand;
   // Search backwards through the command name for a subcommand.
-  for (int commandIndex = commandLen - 1; commandIndex-- > 0;) {
-    if (argv[0][commandIndex] == '-') {
-      commandString = argv[0] + commandIndex + 1;
-      break;
-    } else if (argv[0][commandIndex] == '/') {
+  for (char *p = *argv + strlen(*argv); p-- > *argv && *p != '/';) {
+    if (*p == '-') {
+      ++p;
+      state = stContainer;
+      // Match the subcommand's string to the enum value.
+      if (parseSubcommand(p, &flags->subcommand)) {
+        // Ignore the name if it isn't a valid subcommand.
+        state = stSubcommand;
+      } else
+        switch (flags->subcommand) {
+        case subcommandEnter:
+        case subcommandRemove:
+        case subcommandStart:
+        case subcommandUpgrade:
+        case subcommandCreate:
+          state = stContainer;
+          break;
+        case subcommandHelp:
+          state = stNoMore;
+          break;
+        case subcommandExport:
+          state = stArguments;
+          break;
+        case subcommandEntrypoint:
+          unreachable();
+        }
       break;
     }
   }
 
-  int i = 1; // Start after the command
-  if (!commandString) {
-    if (argc < 2) {
-      flags->subcommand = subcommandHelp;
-      return 0;
-    }
-    commandString = argv[1];
-    ++i;
-  }
+  ++argv;
 
-  // Match the subcommand's string to the enum value.
-  if (!strcmp(commandString, "help")) {
-    flags->subcommand = subcommandHelp;
-    return 0;
-  } else if (!strcmp(commandString, "enter")) {
-    flags->subcommand = subcommandEnter;
-  } else if (!strcmp(commandString, "start")) {
-    flags->subcommand = subcommandStart;
-  } else if (!strcmp(commandString, "create")) {
-    flags->subcommand = subcommandCreate;
-  } else if (!strcmp(commandString, "rm")) {
-    flags->subcommand = subcommandRemove;
-  } else if (!strcmp(commandString, "upgrade")) {
-    flags->subcommand = subcommandUpgrade;
-  } else if (!strcmp(commandString, "export")) {
-    flags->subcommand = subcommandExport;
-  } else {
-    fprintf(stderr, "Unknown subcommand \"%s\"\n", argv[1]);
-    return EX_USAGE;
-  }
+  for (; argv < end; ++argv) {
+    if (**argv == '-') {
+      char *flag = *argv;
+      if (*++flag == '-') { // longflag
+        if (!*++flag) {     // "--"
+          if (++argv < end) {
+            flags->argv = argv;
+            flags->argc = end - argv;
+          }
+          return 0;
+        } else if (!strcmp(flag, "su")) {
+          flags->su = true;
+        } else if (!strcmp(flag, "dry-run")) {
+          flags->dryRun = true;
+        } else if (!strcmp(flag, "image")) {
+          if (++argv == end) {
+            fputs("--image used, but no image specified.\n", stderr);
+            return EX_USAGE;
+          }
+          flags->image = *argv;
+        } else if (!strcmp(flag, "fake-home")) {
+          if (++argv == end) {
+            fputs("--fake-home used, but no directory specified.\n", stderr);
+            return EX_USAGE;
+          }
+          flags->fakeHome = *argv;
+        } else if (!strcmp(flag, "shell")) {
+          flags->shell = true;
+        } else {
+          fprintf(stderr, "Unrecognized flag \"--%s\"\n", flag);
+          return EX_USAGE;
+        }
+        continue;
+      }
 
-  for (; i < argc; ++i) {
-    char *arg = argv[i];
-    if (arg[0] == '-') {
-      for (char *flag = arg; *++flag;) {
+      for (flag = *argv; *++flag;) {
         switch (*flag) {
         default:
           fprintf(stderr, "Unrecognized shortflag \"%c\"\n", *flag);
@@ -165,53 +228,45 @@ int parseArgs(int argc, char *argv[], struct Flags *flags) {
         case 'd':
           flags->dryRun = true;
           break;
-        case '-':         // "--*"
-          if (!*++flag) { // "--"
-            if (argv[i + 1]) {
-              flags->argv = argv + i + 1;
-              flags->argc = argc - i + 1;
-            }
-            return 0;
-          } else if (!strcmp(flag, "su")) {
-            flags->su = true;
-          } else if (!strcmp(flag, "dry-run")) {
-            flags->dryRun = true;
-          } else if (!strcmp(flag, "image")) {
-            if (++i == argc) {
-              fputs("--image used, but no image specified.\n", stderr);
-              return EX_USAGE;
-            }
-            flags->image = argv[i];
-          } else if (!strcmp(flag, "fake-home")) {
-            if (flags->subcommand != subcommandCreate) {
-              fputs("Warning: --fake-home only affects create.\n", stderr);
-            }
-            if (++i == argc) {
-              fputs("--fake-home used, but no directory specified.\n", stderr);
-              return EX_USAGE;
-            }
-            flags->fakeHome = argv[i];
-          } else if (!strcmp(flag, "shell")) {
-            if (flags->subcommand != subcommandExport) {
-              fputs("Warning: --shell only affects export.\n", stderr);
-            }
-            flags->shell = true;
-          } else {
-            fprintf(stderr, "Unrecognized flag \"--%s\"\n", flag);
-            return EX_USAGE;
-          }
-          goto flagParserContinue;
         }
       }
-    } else {
-      flags->container = arg;
-      if (argv[i + 1]) {
-        flags->argv = argv + i + 1;
-        flags->argc = argc - i + 1;
+    } else { // Positional
+      switch (state) {
+      case stArguments:
+        flags->argv = argv;
+        flags->argc = end - argv;
+        return 0;
+      case stContainer:
+        flags->container = *argv;
+        state = stArguments;
+        break;
+      case stSubcommand:
+        if (parseSubcommand(*argv, &flags->subcommand)) {
+          fprintf(stderr, "%s is not a valid subcommand.", *argv);
+          return EX_USAGE;
+        }
+        switch (flags->subcommand) {
+        case subcommandEnter:
+        case subcommandRemove:
+        case subcommandStart:
+        case subcommandUpgrade:
+        case subcommandCreate:
+          state = stContainer;
+          break;
+        case subcommandHelp:
+          state = stNoMore;
+          break;
+        case subcommandExport:
+          state = stArguments;
+          break;
+        case subcommandEntrypoint:
+          unreachable();
+        }
+        break;
+      case stNoMore:
+        fprintf(stderr, "Unexpected positional argument \"%s\"", *argv);
       }
-      return 0;
     }
-  flagParserContinue:;
   }
 
   return 0;
@@ -438,7 +493,7 @@ int containerEnter(struct Flags flags) {
       size_t valueLen = strlen(value);
 
       char *envArg = checkedMalloc(sizeof(char) * (envVarLen + valueLen + 2));
-      *(freeTop++) = envArg;
+      *freeTop++ = envArg;
 
       memcpy(envArg, envVar, envVarLen);
       envArg[envVarLen] = '=';
@@ -479,15 +534,7 @@ int containerRemove(struct Flags flags) {
 
 // Export a desktop file.
 // Not implemented: XDG_DATA_DIRS, icon
-int desktopExport(struct Flags flags) {
-  char *fileName = flags.container;
-
-  // Intentional pointer equality check
-  if (fileName == defaultFlags.container) {
-    fputs("The file to export must be specified.\n", stderr);
-    return EX_USAGE;
-  }
-
+int exportDesktopEntry(struct Flags flags, char *fileName) {
   char *containerId = getenv("CONTAINER_ID");
   if (!containerId) {
     puts("Failed to get container ID. $CONTAINER_ID must be set.");
@@ -582,7 +629,7 @@ int desktopExport(struct Flags flags) {
     stateTryExec,
   } state = stateStartLine;
   static char const *const tryExecStr = "TryExec";
-  static char const *const execStr = tryExecStr + 3;
+  static char const *const execStr = "Exec";
   for (;;) {
     int next = fgetc(sourceFile);
     if (next == EOF) {
@@ -691,6 +738,17 @@ int desktopExport(struct Flags flags) {
   return 0;
 }
 
+int export(struct Flags flags) {
+  int result;
+  char **end = flags.argv + flags.argc;
+  for (char **p = flags.argv; p < end; p++) {
+    if ((result = exportDesktopEntry(flags, *p))) {
+      return result;
+    }
+  }
+  return 0;
+}
+
 // Signal handler that exits the program.
 void entrypointSignalHandler(int signal) {
   (void)signal; // mark as unused
@@ -698,8 +756,8 @@ void entrypointSignalHandler(int signal) {
 }
 
 // This handles being run as /usr/bin/entrypoint.
-// It is used as both the container entrypoint, and as the default command to
-// run when using dizzybox enter.
+// It is used as both the container entrypoint, and as the default command
+// to run when using dizzybox enter.
 int entrypoint(int argc, char *argv[]) {
   (void)argc; // argc is currently passed for consistency only
 
@@ -788,7 +846,7 @@ int main(int argc, char *argv[]) {
   case subcommandUpgrade:
     return installEntrypoint(flags);
   case subcommandExport:
-    return desktopExport(flags);
+    return export(flags);
   case subcommandEntrypoint:
     return entrypoint(argc, argv);
   }
